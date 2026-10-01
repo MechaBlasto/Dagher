@@ -1,0 +1,660 @@
+% OS_VOLUMES_EQUILIBRIUM_CONTRIBUTIONS_FINAL Quantify static-shock volumes.
+%
+% Purpose:
+%   Measure cell, lumen, and whole-embryo volumes from 3-D segmentation masks,
+%   compare them with 2-D max-projection ellipse measurements, and summarize
+%   equilibrium osmotic-shock responses.
+% Inputs:
+%   TIFF masks under folder_path and max-projection TIFF files under
+%   folder_path_maxproj, with filename conventions configured below. The
+%   script also expects the external mask.tif file and configurable output path.
+% Outputs:
+%   files and files_maxproj structures enriched with volume measurements,
+%   paired filename/index MAT files, comparison figures, and statistical MAT
+%   files saved under folder_save/date.
+% Overview:
+%   Finds and labels input files, counts segmented voxels, pairs 3-D masks with
+%   2-D max projections using filename distance, performs interactive ellipse
+%   segmentation, compares measurements, filters samples, and saves analyses.
+% Dependencies:
+%   Image Processing Toolbox (TIFF volume and segmentation functions),
+%   Statistics and Machine Learning Toolbox (matchpairs), and external
+%   generic_codes/daviolinplot paths added in the script. The local editDistance
+%   helper is defined at the end of this file.
+
+%% Osmotic shocks - Steady states - Volumes
+
+%folder containing subfolders or directly the files with labels
+folder_path = '/path/to/data/static_osmotic_shocks_onDish/2025-04-01_VH_static_mtmg_noZP_E3-5'
+subfolder_tolookfor = 'final_masks'%'postprocessed_preds'
+
+% listing the files
+files = dir(fullfile(folder_path,'/*/*/*/*/*/',subfolder_tolookfor,'*.tif'))
+
+%% Initial conditions
+Osmolarities_str = {'257mOsm'; '295mOsm'; '345mOsm'; '445mOsm'; '234mOsm'; '169mOsm'; '123mOsm'};
+Conditions = {'Control'; 'Sucrose 43.25mM'; 'Sucrose 87.5mM'; 'Sucrose 175mM'; 'Water dilution 10%'; 'Water dilution 30%'; 'Water dilution 50%'};
+colours = [0.15,0.15,0.15; 0.38,0.77,0.09;0.09,0.66,0.06;0.05,0.45,0.03;0.94,0.57,0.73;0.84,0.07,0.40;0.57,0,0.25;0.30,0.75,0.93];
+conditions_filenames = {'Control';'43*25mM';'87*5mM';'175mM';'10%';'30%';'50%'}
+
+timing_filenames = {'_ti_';'_t10min_'};
+
+several_stage_positionings = 1 %several samples (embryos) are in the same folder, and can be distinguished by their stage name 's1, s2, ....'
+timing_name = 1 %z-stacks of initial timing and after OS are in the same folder for the same sample ; they are designated by specific labels such '_ti_';'_t10min_'
+
+%% Quantify masks
+checking_duplicates = [];
+
+for f = 1 : length(files) %for each file
+    % Find the current experiment condition
+    for experiment = 1 : length(conditions_filenames) %for each potential condition
+        c = strfind(files(f).name,conditions_filenames(experiment)); %look if we can find it in the filename
+        if isempty(c) == 0 %if the answer is not an empty array
+            %keep the information in the main matrix
+            files(f).Conditions = Conditions(experiment);
+            files(f).Osmolarities_str = Osmolarities_str(experiment);
+        end 
+    end
+
+    % Image analysis
+    filtered_image = tiffreadVolume(fullfile(files(f).folder, files(f).name)); %load the image matrix
+
+    cells = sum(filtered_image(:) == 2); %count the number of pixels with the value '2', labelling the embryo cells
+    lumen  = sum(filtered_image(:) == 1); %count the number of pixels with the value '1', labelling the embryo lumen
+    %save the values in the files matrix
+    files(f).cells_pixel_count = cells; %cells pixels
+    files(f).lumen_pixel_count = lumen; %lumen pixels
+    files(f).embryo_pixel_count = (cells + lumen); %entire embryo pixels
+
+    scale2volume = 0.65 .* 0.65 .* 1; %Narishige imaging 40X but binned images by 4, 1 micron z-step, micrometer cube
+    files(f).cells_volume_pL = cells .* scale2volume .* (10^-3);
+    files(f).lumen_volume_pL = lumen .* scale2volume .* (10^-3);
+    files(f).embryo_volume_pL = (cells + lumen) .* scale2volume .* (10^-3);
+
+    checking_duplicates = [checking_duplicates; convertCharsToStrings(files(f).folder)];
+
+end
+
+
+%% Retrieve volumes from 3D segmentation matrix (already existing as 'files' name)
+
+if exist('checking_duplicates') == 0
+    checking_duplicates = string({files.folder}');
+end
+
+duplicate_indices = [];
+unique_elements = unique(checking_duplicates); %gather the pathnames of all subfolders, 1 subfolder = many embryos with all the events (ti, tOS)
+position_filenames = '_s';
+
+Vcell_i = [];
+Vlumen_i = [];
+Vembryo_i = [];
+
+Vcell_OS = [];
+Vlumen_OS = [];
+Vembryo_OS = [];
+
+color_indexes = [];
+condition_sample = [];
+
+for experiment = 1:numel(unique_elements) %for each subfolder
+    
+    if timing_name == 1
+        % find indexes of files of this specific subfolder
+        indices = find(checking_duplicates == unique_elements(experiment));
+
+        for sample = 1 : (size(dir(fullfile(unique_elements(experiment), '*.tif')),1) ./ size(timing_filenames,1)) %for each sample
+            pattern_position = [position_filenames num2str(sample) '_'];
+            disp(pattern_position)
+            pat_ti = {pattern_position; timing_filenames(1)}; %to find the correct sample number and t_i condition
+            pat_tOS = {pattern_position; timing_filenames(2)}; %to find the correct sample number and t_OS condition
+            
+            % define a function to find within the current filename the 2
+            % string patterns
+            fun = @(s)~cellfun('isempty',strfind({files(indices).name},s));
+            % find the corresponding t_i file (index within files matrix)
+            out_ti = cellfun(fun,pat_ti,'UniformOutput',false);
+            [v, idx_ti] = max(sum(cell2mat(out_ti)));
+            % find the corresponding t_OS file (index within files matrix)
+            out_tOS = cellfun(fun,pat_tOS,'UniformOutput',false);
+            [v, idx_tOS] = max(sum(cell2mat(out_tOS)));
+
+            % -------------------------------------------------------------
+
+            if isempty(files(idx_ti).ZPdigestion)
+                result = false;  % Default to false if no strings exist
+            else
+                result = contains(string(files(idx_ti).ZPdigestion), 'Zona Pellucida')
+                if result == 1
+
+            % Find colour corresponding to current experiment condition
+            c_index = find(convertCharsToStrings(Conditions) == convertCharsToStrings(files(indices(1)).Conditions));
+            c = colours(c_index,:);
+            
+
+            % Retrieve corresponding sample from the matrix --------------------------------------------
+            Vcell_i_sample = files(indices(idx_ti)).cells_volume_pL;
+            Vlumen_i_sample = files(indices(idx_ti)).lumen_volume_pL;
+            Vembryo_i_sample = files(indices(idx_ti)).embryo_volume_pL;
+
+            Vcell_OS_sample = files(indices(idx_tOS)).cells_volume_pL;
+            Vlumen_OS_sample = files(indices(idx_tOS)).lumen_volume_pL;
+            Vembryo_OS_sample = files(indices(idx_tOS)).embryo_volume_pL;
+
+            % To facilitate plotting, store in temporary small lists;
+            % Each row is corresponding to a specific embryo, related
+            % either to initial/after OS volume, for the lumen/cells/entire
+            % embryo, accompanied with the condition reference and the
+            % 'correct' index color
+            Vcell_i = [Vcell_i; Vcell_i_sample];
+            Vlumen_i = [Vlumen_i; Vlumen_i_sample];
+            Vembryo_i = [Vembryo_i; Vembryo_i_sample];
+
+            Vcell_OS = [Vcell_OS; Vcell_OS_sample];
+            Vlumen_OS = [Vlumen_OS; Vlumen_OS_sample];
+            Vembryo_OS = [Vembryo_OS; Vembryo_OS_sample];
+
+            color_indexes = [color_indexes; c_index];
+            condition_sample = [condition_sample;Conditions(c_index)];
+                end 
+
+            end
+
+        end
+    end
+end
+
+%% Comparing 3D and 2D analysis 
+% Finding back the corresponding max projections
+% listing the maxproj files
+folder_path_maxproj = "/path/to/data/static_osmotic_shocks_onDish"; %root folder containing all experiments
+files_maxproj = dir(fullfile(folder_path_maxproj,'/*/*/','561','Max_projections','cropped2', 'MAX_*.tif')); %max projections should be per condition in a Max-projections folder. Use the FIJI macro to generate these maxproj.
+mask = tiffreadVolume('/path/to/data/static_osmotic_shocks_onDish/Maxproj_VH_static_ZP_all/mask.tif');
+micron_scale = 0.1625;
+% Computing volumes from maximal projection images and storing results in
+% files_maxproj
+for k = 1:length(files_maxproj) %for each file
+    disp(k)
+    
+    % retrieve its path
+    fullFileName = fullfile(files_maxproj(k).folder, files_maxproj(k).name);
+    % Ellipse fitting
+    imageData = tiffreadVolume(fullFileName); %open the image
+
+    %preprocessing steps
+    I = imsharpen(imageData,'Radius',100,'Amount',10);
+    figure(1)
+    imshow(I, [])
+    % Draw an initial contour close to the object of interest
+    roi = drawpolygon;
+    % create mask
+    BW = createMask(roi,I);
+    bw = activecontour(I,BW,500,'Chan-Vese','SmoothFactor',1);
+    bw = bwareaopen(bw,10000);
+    se = strel('disk',400);
+    bw = imclose(bw,se);
+    figure(2)
+    imshow(I, [])
+    hold on;
+    visboundaries(bw,'Color','r');
+    % Calculate centroid, orientation and major/minor axis length of the ellipse
+    s = regionprops(bw,{'Centroid','Area','Orientation', 'Circularity','Eccentricity','MajorAxisLength','MinorAxisLength'});
+    % Calculate the ellipse line
+    theta = linspace(0,2*pi);
+    col = (s.MajorAxisLength/2)*cos(theta);
+    row = (s.MinorAxisLength/2)*sin(theta);
+    M = makehgtform('translate',[s.Centroid, 0],'zrotate',deg2rad(-1*s.Orientation));
+    D = M*[col;row;zeros(1,numel(row));ones(1,numel(row))];
+    % Visualize the result of fitting
+    plot(D(1,:),D(2,:),'c','LineWidth',2)
+    hold off
+    % Bw = poly2mask(D(1,:),D(2,:),size(I,1),size(I,2));
+
+    % Extract parameters
+    area = s.Area; %bwarea(Bw);
+    r = sqrt(area/pi);
+    diameter_microns = r * micron_scale * 2;
+    embryo_volume_pL = (4/3 .* pi .* ((r * micron_scale).^3)) .* (10^-3);
+
+    % Save the analysis into the matrix
+    files_maxproj(k).area = s.Area;
+    files_maxproj(k).diameter_microns = diameter_microns;
+    files_maxproj(k).embryo_volume_pL = embryo_volume_pL;
+    files_maxproj(k).ellipse_centroid = s.Centroid;
+    files_maxproj(k).Orientation = s.Orientation;
+    files_maxproj(k).MajorAxisLength = s.MajorAxisLength;
+    files_maxproj(k).MinorAxisLength = s.MinorAxisLength;
+    files_maxproj(k).Circularity = s.Circularity;
+    files_maxproj(k).Eccentricity = s.Eccentricity;
+end
+
+disp('Done')
+
+% Gather all filenames from masks and maxprojection images in two different
+% arrays
+Filenames_masks = {files.name};
+Filenames_maxproj = {files_maxproj.name};
+
+% Remove in theses strings, patterns that are specific to their categorie
+pattern_maxproj = "MAX_";
+pattern_masks = "_crop_025_025_1_largestOnly";
+cleanFilenames_maxproj = cellfun(@(x) regexprep(x, pattern_maxproj, ''), string(Filenames_maxproj), 'UniformOutput', false);
+cleanFilenames_masks = cellfun(@(x) regexprep(x, pattern_masks, ''), string(Filenames_masks), 'UniformOutput', false);
+
+% Filenames count for looping
+nFilenames_masks = numel(Filenames_masks);
+nFilenames_maxproj = numel(Filenames_maxproj);
+% Find which filenames have the most similarity
+% Compute pairwise Levenshtein distance
+costMatrix = inf(nFilenames_masks, nFilenames_maxproj);
+for i = 1:nFilenames_masks
+    for j = 1:nFilenames_maxproj
+        costMatrix(i, j) = editDistance(cleanFilenames_masks{i}, cleanFilenames_maxproj{j});
+    end
+end
+% Associate pairs
+% Solve assignment problem (Hungarian algorithm)
+[rowIdx, colIdx] = matchpairs(costMatrix, max(costMatrix(:))); 
+
+% Format the output pairs and their original indexes
+pairedFilenames = cell(size(rowIdx, 1), 2);
+indexPairs = zeros(size(rowIdx, 1), 2);
+for k = 1:size(rowIdx, 1)
+    pairedFilenames{k, 1} = Filenames_masks{rowIdx(k,1)};
+    pairedFilenames{k, 2} = Filenames_maxproj{rowIdx(k,2)};
+    indexPairs(k, :) = [rowIdx(k,1), rowIdx(k,2)]; % Store original indexes, first the 3d mask index, second the maxproj image index
+    % Add to 'files' structure, a corresponding column with embryo volumes from
+    % 2D analysis
+    files(rowIdx(k,1)).embryo_volume_2D = files_maxproj(rowIdx(k,2)).embryo_volume_pL;
+
+end
+
+% Get field names
+fields = fieldnames(files);
+
+% Loop through each field and set NaN or empty string
+for j = 1:numel(files)
+    for n = 1:numel(fields)
+        if isempty(files(j).embryo_volume_2D)
+            if isnumeric(files(j).embryo_volume_2D)  % Check if field is numeric
+                files(j).(fields{n}) = NaN;
+            % else
+            %     S(row_to_replace).(fields{i}) = ""; % Empty string for text fields
+            end
+        end
+    end
+end
+
+%% Initialise saving
+folder_save = '/path/to/results/static_osmotic_shocks_onDish//Analysis/VantHoff_static'
+filename_matrix = '_data_OS_on-dish_equilibrium_3D&2Dsegmentations.mat'
+
+% Create a subfolder with today date
+date = string(datetime("now"));
+mkdir(fullfile(folder_save,date))
+
+% Save final matrix with all samples
+save(fullfile(folder_save,date,strcat(date, filename_matrix)),'files','-mat')
+
+%% ----Plotting to compare analysis methodologies 2D vs 3D
+%Comparing corresponding volumes
+volumes_from3D = cell2mat({files.embryo_volume_pL});
+volumes_from2D = cell2mat({files.embryo_volume_2D});
+
+h = figure
+scatter(volumes_from3D,volumes_from2D)
+xlabel('Embryo volume from 3D analysis')
+ylabel('Corresponding embryo volume from 2D analysis')
+fontsize(14,"points")
+
+hold on
+x = linspace(0,1000,1400);
+y = x;
+plot(x,y,'k', 'DisplayName','y = x')
+
+% Save 2D / 3D comparison
+save(fullfile(folder_save,date,'indexPairs.mat'),'indexPairs','-mat')
+save(fullfile(folder_save,date,'pairedFilenames.mat'),'pairedFilenames','-mat')
+save(fullfile(folder_save,date,'data_files_maxproj_hatchingfiltrated.mat'),'files_maxproj','-mat')
+
+savefig(h,fullfile(folder_save,date,'2d_3d_comparison.fig'))
+exportgraphics(h,fullfile(folder_save,date,'2d_3d_comparison.png'), 'Resolution',300)
+
+
+%% 3D analysis
+% ------------------ Filtering -------------------------
+% Filter samples according to the median initial cellular volume among all embryos
+% We keep samples with an initial lumen volume that is superior or equal to
+% this value
+median_cellular_volume = median(Vcell_i, 1); %in pL
+threshold = find(Vlumen_i >= median_cellular_volume); %find indexes
+% Filter lists
+Vcell_i_filtr = Vcell_i(threshold);
+Vlumen_i_filtr = Vlumen_i(threshold);
+Vembryo_i_filtr = Vembryo_i(threshold);
+
+Vcell_OS_filtr = Vcell_OS(threshold);
+Vlumen_OS_filtr = Vlumen_OS(threshold);
+Vembryo_OS_filtr = Vembryo_OS(threshold);
+
+color_indexes_filtr = color_indexes(threshold);
+condition_sample_filtr = condition_sample(threshold);
+
+% To filter
+% first row is initial time
+% second row is after OS time
+Vcell = [Vcell_i_filtr,Vcell_OS_filtr]';
+Vlumen = [Vlumen_i_filtr,Vlumen_OS_filtr]';
+Vembryo = [Vembryo_i_filtr,Vembryo_OS_filtr]';
+
+c = color_indexes_filtr;
+x = repelem([0;1],[1],[size(Vembryo,2)]); %2 %to position events along x-axis, one row of [0, 1] per embryo
+
+raw_volume_max = 1000; %pL
+raw_volume_min = 0 ; %pL
+xf = [0,1];
+RGB_colors = colours(c,:);
+RGB_colors_nofilter = colours(color_indexes,:);
+
+%% ---------------- Plotting Lumen behavior VS cell behavior during osmotic shocks 
+
+% Lumen and cellular volumes at t=OS
+% Filtrated data, with Vi(Lumen) <= median(Vi(Cells))
+f22 = figure(22)
+scatter(Vcell_OS_filtr',Vlumen_OS_filtr',50,RGB_colors,'filled')
+xlabel('Cellular volume after OS (pL)')
+ylabel('Lumen volume after OS (pL)')
+fontsize(14,"points")
+ylim([raw_volume_min 500])
+xlim([raw_volume_min 500])
+
+% All samples
+f23 = figure(23)
+scatter(Vcell_OS',Vlumen_OS',50,RGB_colors_nofilter,'filled')
+xlabel('Cellular volume after OS (pL)')
+ylabel('Lumen volume after OS (pL)')
+fontsize(14,"points")
+ylim([raw_volume_min 500])
+xlim([raw_volume_min 500])
+
+% Ratios of Volumes t=OS/t=i
+% Filtrated data, with Vi(Lumen) <= median(Vi(Cells))
+f24 = figure(24)
+scatter(Vcell_OS_filtr ./ Vcell_i_filtr, Vlumen_OS_filtr ./ Vlumen_i_filtr,50,RGB_colors,'filled')
+xlabel('VCell_O_S / VCell_i')
+ylabel('Vlumen_O_S / Vlumen_i')
+fontsize(14,"points")
+ylim([0 2.5])
+xlim([0 2.5])
+
+% All samples
+f25 = figure(25)
+scatter(Vcell_OS ./ Vcell_i, Vlumen_OS ./ Vlumen_i,50,RGB_colors_nofilter,'filled')
+xlabel('VCell_O_S / VCell_i')
+ylabel('Vlumen_O_S / Vlumen_i')
+fontsize(14,"points")
+ylim([0 2.5])
+xlim([0 2.5])
+
+% Correlations
+% f22 figure
+% fitting filtered volumes at tOS
+p_all_shocks_compartiments_OS_filtr = polyfit(Vcell_OS_filtr', Vlumen_OS_filtr',1);
+f_all_shocks_compartiments_OS_filtr = polyval(p_all_shocks_compartiments_OS_filtr,Vcell_OS_filtr');
+figure(22)
+hold on
+plot(Vcell_OS_filtr',f_all_shocks_compartiments_OS_filtr,'k')
+extendline(Vcell_OS_filtr',f_all_shocks_compartiments_OS_filtr,p_all_shocks_compartiments_OS_filtr,0,500,'k')
+[R_compartiments_OS_filtr, pval_compartiments_OS_filtr] = corrcoef(Vcell_OS_filtr', Vlumen_OS_filtr');
+
+% f23 figure
+% fitting all volumes at tOS
+p_all_shocks_compartiments_OS = polyfit(Vcell_OS', Vlumen_OS',1);
+f_all_shocks_compartiments_OS = polyval(p_all_shocks_compartiments_OS,Vcell_OS');
+figure(23)
+hold on
+plot(Vcell_OS',f_all_shocks_compartiments_OS,'k')
+extendline(Vcell_OS',f_all_shocks_compartiments_OS,p_all_shocks_compartiments_OS,0,500,'k')
+[R_compartiments_OS, pval_compartiments_OS] = corrcoef(Vcell_OS', Vlumen_OS');
+
+% f24 figure
+% fitting ratios of filtered embryos
+p_all_shocks_ratio_compartiments_filtr = polyfit((Vcell_OS_filtr ./ Vcell_i_filtr), (Vlumen_OS_filtr ./ Vlumen_i_filtr),1);
+f_all_shocks_ratio_compartiments_filtr = polyval(p_all_shocks_ratio_compartiments_filtr,(Vcell_OS_filtr ./ Vcell_i_filtr));
+figure(24)
+hold on
+plot((Vcell_OS_filtr ./ Vcell_i_filtr),f_all_shocks_ratio_compartiments_filtr,'k')
+extendline((Vcell_OS_filtr ./ Vcell_i_filtr),f_all_shocks_ratio_compartiments_filtr,p_all_shocks_ratio_compartiments_filtr,0,500,'k')
+[R_ratio_compartiments_filtr, pval_ratio_compartiments_filtr] = corrcoef((Vcell_OS_filtr ./ Vcell_i_filtr), (Vlumen_OS_filtr ./ Vlumen_i_filtr));
+
+% f25 figure
+% fitting ratios of all embryos
+p_all_shocks_ratio_compartiments = polyfit((Vcell_OS ./ Vcell_i), (Vlumen_OS ./ Vlumen_i),1);
+f_all_shocks_ratio_compartiments = polyval(p_all_shocks_ratio_compartiments,(Vcell_OS ./ Vcell_i));
+figure(25)
+hold on
+plot((Vcell_OS ./ Vcell_i),f_all_shocks_ratio_compartiments,'k')
+extendline((Vcell_OS ./ Vcell_i),f_all_shocks_ratio_compartiments,p_all_shocks_ratio_compartiments,0,2.5,'k')
+[R_ratio_compartiments, pval_ratio_compartiments] = corrcoef((Vcell_OS ./ Vcell_i), (Vlumen_OS ./ Vlumen_i));
+
+% saving figures
+savefig(f22,fullfile(folder_save,date,'Lumen_vs_cellular_volumes_tOS_filtratedsamples.fig'))
+savefig(f23,fullfile(folder_save,date,'Lumen_vs_cellular_volumes_tOS_allsamples.fig'))
+savefig(f24,fullfile(folder_save,date,'Lumen_vs_cellular_volumes_ratios_tiovertOS_filtratedsamples.fig'))
+savefig(f25,fullfile(folder_save,date,'Lumen_vs_cellular_volumes_ratios_tiovertOS_allsamples.fig'))
+
+exportgraphics(f22,fullfile(folder_save,date,'Lumen_vs_cellular_volumes_tOS_filtratedsamples.png'), 'Resolution',300)
+exportgraphics(f23,fullfile(folder_save,date,'Lumen_vs_cellular_volumes_tOS_allsamples.png'), 'Resolution',300)
+exportgraphics(f24,fullfile(folder_save,date,'Lumen_vs_cellular_volumes_ratios_tiovertOS_filtratedsamples.png'), 'Resolution',300)
+exportgraphics(f25,fullfile(folder_save,date,'Lumen_vs_cellular_volumes_ratios_tiovertOS_allsamples.png'), 'Resolution',300)
+
+% Save corresponding R correlations
+% Save as matrices the fitting lines, and associated p-values and
+% correlation coefficients
+save(fullfile(folder_save,date,'line_all_shocks_compartiments_OS_filtrsamples.mat'),'p_all_shocks_compartiments_OS', '-mat')
+save(fullfile(folder_save,date,'line_all_shocks_compartiments_OS_allsamples.mat'),'p_all_shocks_compartiments_OS_filtr', '-mat')
+save(fullfile(folder_save,date,'line_all_shocks_ratio_compartiments_filtrsamples.mat'),'p_all_shocks_ratio_compartiments_filtr', '-mat')
+save(fullfile(folder_save,date,'line_all_shocks_ratio_compartiments_allsamples.mat'),'p_all_shocks_ratio_compartiments', '-mat')
+
+save(fullfile(folder_save,date,'pval_compartiments_OS_filtrsamples.mat'),'pval_compartiments_OS_filtr', '-mat')
+save(fullfile(folder_save,date,'pval_compartiments_OS_allsamples.mat'),'pval_compartiments_OS', '-mat')
+save(fullfile(folder_save,date,'pval_ratio_compartiments_filtrsamples.mat'),'pval_ratio_compartiments_filtr', '-mat')
+save(fullfile(folder_save,date,'pval_ratio_compartiments_allsamples.mat'),'pval_ratio_compartiments', '-mat')
+
+save(fullfile(folder_save,date,'R_compartiments_OS_filtrsamples.mat'),'R_compartiments_OS_filtr', '-mat')
+save(fullfile(folder_save,date,'R_compartiments_OS_allsamples.mat'),'R_compartiments_OS', '-mat')
+save(fullfile(folder_save,date,'R_ratio_compartiments_filtrsamples.mat'),'R_ratio_compartiments_filtr', '-mat')
+save(fullfile(folder_save,date,'R_ratio_compartiments_allsamples.mat'),'R_ratio_compartiments', '-mat')
+
+
+% Same plots for later analysis - ZP vs no ZP
+
+Osmolarities_str = {'257 mOsm'; '295 mOsm'; '345 mOsm'; '445 mOsm'; '234 mOsm'; '169 mOsm'; '123 mOsm'};
+Conditions = {'Control'; 'Sucrose 43.25mM'; 'Sucrose 87.5mM'; 'Sucrose 175mM'; 'Water dilution 10%'; 'Water dilution 30%'; 'Water dilution 50%'};
+colours = [0.15,0.15,0.15; 0.38,0.77,0.09;0.09,0.66,0.06;0.05,0.45,0.03;0.94,0.57,0.73;0.84,0.07,0.40;0.57,0,0.25];
+group_osm = [257;295;345;445;234;169;123];
+
+% Map each label in color_label to an index in group_names
+[~, group_idx] = ismember(osm, group_osm);  % group_idx now has integer indices
+
+% Get the corresponding RGB for each point
+RGB_colors = colours(group_idx,:);
+
+% Ratios of Volumes t=OS/t=i
+% Filtrated data, with Vi(Lumen) <= median(Vi(Cells))
+f26 = figure
+% scatter(ratios_cell, ratios_lumen,50,RGB_colors,'filled','MarkerEdgeColor',[1 1 1])
+scatter(ratios_cell(~noZP_embryos), ratios_lumen(~noZP_embryos),60,RGB_colors(~noZP_embryos,:),'filled', 'MarkerEdgeColor',[1 1 1])
+hold on
+scatter(ratios_cell(noZP_embryos), ratios_lumen(noZP_embryos),60,RGB_colors(noZP_embryos,:),'filled', 'MarkerEdgeColor',[1 1 1],'Marker', 's')
+xlabel('V_{Cell_{OS}} / V_{Cell_{i}}', 'Interpreter', 'tex','FontSize', 18,'FontName', get(gca, 'FontName'));
+ylabel('V_{Lumen_{OS}} / V_{Lumen_{i}}', 'Interpreter', 'tex','FontSize', 18,'FontName', get(gca, 'FontName'));
+fontsize(18,"points")
+ylim([0 2.5])
+xlim([0 2.5])
+
+% Linear correlation
+p_all_shocks_ratio_compartiments_filtr = polyfit(ratios_cell, ratios_lumen,1);
+f_all_shocks_ratio_compartiments_filtr = polyval(p_all_shocks_ratio_compartiments_filtr,ratios_cell);
+hold on
+plot(ratios_cell,f_all_shocks_ratio_compartiments_filtr,'k')
+extendline(ratios_cell,f_all_shocks_ratio_compartiments_filtr,p_all_shocks_ratio_compartiments_filtr,0,500,'k')
+[R_ratio_compartiments_filtr, pval_ratio_compartiments_filtr] = corrcoef(ratios_cell, ratios_lumen);
+
+% Create dummy plots for legend
+for c = 1:size(colours,1)
+    h(c) = plot(nan, nan, 'o', 'MarkerFaceColor', colours(c,:), ...
+        'MarkerEdgeColor', 'none', 'DisplayName', string(Osmolarities_str(c)));
+end
+h(c+1) = plot(nan, nan, 'o', 'MarkerFaceColor', 'w', ...
+        'MarkerEdgeColor', 'k', 'DisplayName', 'with ZP');
+h(c+2) = plot(nan, nan, 'square', 'MarkerFaceColor', 'w', ...
+        'MarkerEdgeColor', 'k', 'DisplayName', 'no ZP');
+
+legend(h, 'Location', 'southeast');
+
+savefig(f26,fullfile(folder_save,date,'Cell_ratios_vs_Lumen_ratios.fig'))
+exportgraphics(f26,fullfile(folder_save,date,'Cell_ratios_vs_Lumen_ratios.png'), 'Resolution',300)
+
+save(fullfile(folder_save,date,'line_ratios_filtrated.mat'),'p_all_shocks_ratio_compartiments_filtr', '-mat')
+save(fullfile(folder_save,date,'pval_ratios_filtrated.mat'),'pval_ratio_compartiments_filtr', '-mat')
+save(fullfile(folder_save,date,'R_ratios_filtrated.mat'),'R_ratio_compartiments_filtr', '-mat')
+
+%% Plot volumes - finalset
+
+% Distinguish between ZP / no ZP embryos
+ZPdigestion = {finalset.ZPdigestion}';
+ZPdigestion(cellfun(@isempty, ZPdigestion)) = {'NaN'};
+ZPlabel = string(ZPdigestion);
+ZPlabel = ZPlabel(~strcmp(ZPlabel, 'NaN'));
+noZP_embryos = contains(ZPlabel, 'no ZP');
+
+% set x axis, as ti, tOS
+x = repelem([0;1],[1],[size(Vembryo,1)])'; %2 %to position events along x-axis, one row of [0, 1] per embryo
+raw_volume_max = 1000; %pL
+raw_volume_min = 0 ; %pL
+xf = [0,1];
+
+% ----------------- Plot volumes before and after static osmotic shock
+
+f4 = figure(4) %Lumen volume - ZP blastocysts
+f4.Position = [100 100 207 420];
+set(gca,'ColorOrder',RGB_colors(~noZP_embryos,:));
+hold all;
+plot(x(~noZP_embryos,:)', Vlumen(~noZP_embryos,:)', '-', 'MarkerEdgeColor','w', 'LineWidth', 1)
+scatter(x(~noZP_embryos,:)',Vlumen(~noZP_embryos,:)',30,RGB_colors(~noZP_embryos,:),'filled','MarkerEdgeColor', 'w') 
+xticks(xf)
+xticklabels({'t_i', 't_O_S'})
+ylabel('Lumen volume (pL)')
+fontsize(18,"points")
+ylim([raw_volume_min raw_volume_max])
+savefig(f4,fullfile(folder_save,date,'Volumes_lumen_withZP.fig'))
+exportgraphics(f4,fullfile(folder_save,date,'Volumes_lumen_withZP.png'), 'Resolution',300)
+
+f5 = figure(5) %Lumen volume - no ZP blastocysts
+f5.Position = [100 100 207 420];
+set(gca,'ColorOrder',RGB_colors(noZP_embryos,:));
+hold all;
+plot(x(noZP_embryos,:)', Vlumen(noZP_embryos,:)', '-', 'MarkerEdgeColor','w', 'LineWidth', 1)
+scatter(x(noZP_embryos,:)',Vlumen(noZP_embryos,:)',30,RGB_colors(noZP_embryos,:),'filled','MarkerEdgeColor', 'w','Marker', 's') 
+xticks(xf)
+xticklabels({'t_i', 't_O_S'})
+ylabel('Lumen volume (pL)')
+fontsize(18,"points")
+ylim([raw_volume_min raw_volume_max])
+savefig(f5,fullfile(folder_save,date,'Volumes_lumen_noZP.fig'))
+exportgraphics(f5,fullfile(folder_save,date,'Volumes_lumen_noZP.png'), 'Resolution',300)
+
+f6 = figure(6) %Cellular volume - ZP blastocysts
+f6.Position = [100 100 207 420];
+set(gca,'ColorOrder',RGB_colors(~noZP_embryos,:));
+hold all;
+plot(x(~noZP_embryos,:)', Vcell(~noZP_embryos,:)', '-', 'MarkerEdgeColor','w', 'LineWidth', 1)
+scatter(x(~noZP_embryos,:)',Vcell(~noZP_embryos,:)',30,RGB_colors(~noZP_embryos,:),'filled','MarkerEdgeColor', 'w') 
+xticks(xf)
+xticklabels({'t_i', 't_O_S'})
+ylabel('Cellular volume (pL)')
+fontsize(18,"points")
+ylim([raw_volume_min raw_volume_max])
+savefig(f6,fullfile(folder_save,date,'Volumes_cells_withZP.fig'))
+exportgraphics(f6,fullfile(folder_save,date,'Volumes_cells_withZP.png'), 'Resolution',300)
+
+f7 = figure(7) %Cellular volume - no ZP blastocysts
+f7.Position = [100 100 207 420];
+set(gca,'ColorOrder',RGB_colors(noZP_embryos,:));
+hold all;
+plot(x(noZP_embryos,:)', Vcell(noZP_embryos,:)', '-', 'MarkerEdgeColor','w', 'LineWidth', 1)
+scatter(x(noZP_embryos,:)',Vcell(noZP_embryos,:)',30,RGB_colors(noZP_embryos,:),'filled','MarkerEdgeColor', 'w', 'Marker','s') 
+xticks(xf)
+xticklabels({'t_i', 't_O_S'})
+ylabel('Cellular volume (pL)')
+fontsize(18,"points")
+ylim([raw_volume_min raw_volume_max])
+savefig(f7,fullfile(folder_save,date,'Volumes_cells_noZP.fig'))
+exportgraphics(f7,fullfile(folder_save,date,'Volumes_cells_noZP.png'), 'Resolution',300)
+
+f8 = figure(8) %Embryo volume - ZP blastocysts
+f8.Position = [100 100 207 420];
+set(gca,'ColorOrder',RGB_colors(~noZP_embryos,:));
+hold all;
+plot(x(~noZP_embryos,:)', Vembryo(~noZP_embryos,:)', '-', 'MarkerEdgeColor','w', 'LineWidth', 1)
+scatter(x(~noZP_embryos,:)',Vembryo(~noZP_embryos,:)',30,RGB_colors(~noZP_embryos,:),'filled','MarkerEdgeColor', 'w') 
+xticks(xf)
+xticklabels({'t_i', 't_O_S'})
+ylabel('Embryo volume (pL)')
+fontsize(18,"points")
+ylim([raw_volume_min raw_volume_max])
+savefig(f8,fullfile(folder_save,date,'Volumes_embryo_withZP.fig'))
+exportgraphics(f8,fullfile(folder_save,date,'Volumes_embryo_withZP.png'), 'Resolution',300)
+
+f9 = figure(9) %Embryo volume - no ZP blastocysts
+f9.Position = [100 100 207 420];
+set(gca,'ColorOrder',RGB_colors(noZP_embryos,:));
+hold all;
+plot(x(noZP_embryos,:)', Vembryo(noZP_embryos,:)', '-', 'MarkerEdgeColor','w', 'LineWidth', 1)
+scatter(x(noZP_embryos,:)',Vembryo(noZP_embryos,:)',30,RGB_colors(noZP_embryos,:),'filled','MarkerEdgeColor', 'w', 'Marker','s') 
+xticks(xf)
+xticklabels({'t_i', 't_O_S'})
+ylabel('Embryo volume (pL)')
+fontsize(18,"points")
+ylim([raw_volume_min raw_volume_max])
+savefig(f9,fullfile(folder_save,date,'Volumes_embryo_noZP.fig'))
+exportgraphics(f9,fullfile(folder_save,date,'Volumes_embryo_noZP.png'), 'Resolution',300)
+
+
+%% --------- Plot segmentation error 2D vs 3D
+
+embryo_volume_2D = cell2mat({finalset.embryo_volume_2D})';
+embryo_volume_3D = cell2mat({finalset.embryo_volume_pL})';
+ZPdigestion = {finalset.ZPdigestion}';
+ZPdigestion(77:152) = ZPdigestion(1:76);
+noZP_embryos = contains(ZPdigestion, 'no ZP');
+
+f2D = figure 
+hold on
+scatter(embryo_volume_2D(~noZP_embryos),embryo_volume_3D(~noZP_embryos),30,'k','filled','MarkerEdgeColor','w','DisplayName', 'with ZP')
+scatter(embryo_volume_2D(noZP_embryos),embryo_volume_3D(noZP_embryos),30,'r','filled','MarkerEdgeColor','w','DisplayName', 'no ZP')
+ylabel('3D segmentation - Embryo volume (pL)')
+xlabel('2D segmentation - Embryo volume (pL)')
+fontsize(18,"points")
+legend('Location', 'northwest')
+
+
+%% Fonctions
+function d = editDistance(str1, str2)
+    % Compute Levenshtein distance between two strings
+    m = length(str1);
+    n = length(str2);
+    D = zeros(m+1, n+1);
+
+    for i = 0:m, D(i+1,1) = i; end
+    for j = 0:n, D(1,j+1) = j; end
+
+    for i = 2:m+1
+        for j = 2:n+1
+            cost = (str1(i-1) ~= str2(j-1));
+            D(i,j) = min([D(i-1,j) + 1, D(i,j-1) + 1, D(i-1,j-1) + cost]);
+        end
+    end
+    d = D(m+1, n+1);
+end
