@@ -1,0 +1,1 @@
+yapic train unet_2d "../data/yapic_training_dataset_cell_discoverer/input/*.tif" "../data/yapic_training_dataset_cell_discoverer/target/*.tif" -f ../data/yapic_training_dataset_cell_discoverer/model_cell_discoverer.h5 --csvfile=../data/yapic_training_dataset_cell_discoverer/loss_cell_discoverer.csv

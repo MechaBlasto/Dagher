@@ -1,0 +1,511 @@
+% ZP_SEG_POSTPROCESSING Extract embryo growth and zona-pellucida measurements.
+%
+% Purpose:
+%   Post-process segmented brightfield embryo and, optionally, zona pellucida
+%   TIFF stacks and quantify their geometry over time.
+% Inputs:
+%   folder_name, filename, experiment, folder_analysis, filename_analysis,
+%   n_embryos, ZP, and pixel_size configured below. The corresponding embryo
+%   mask TIFF is expected at fullfile(folder_name, "C1-" + filename).
+% Outputs:
+%   zp_results saved to folder_analysis/date/filename_analysis and final embryo
+%   mask TIFF files in a folder created beside the input stack.
+% Overview:
+%   Reads each frame, cleans the embryo probability mask, tracks the selected
+%   embryo, optionally transforms ZP masks to polar coordinates, calculates
+%   geometry and thickness measurements, and saves the resulting structure.
+% Dependencies:
+%   Image Processing Toolbox and the external imcart2pol and customcolormap
+%   code directories added below. The input masks are produced upstream by
+%   the segmentation workflow and are not included in this repository.
+
+addpath('/path/to/external_tools/generic_codes/imcart2pol')
+addpath('/path/to/external_tools/generic_codes/customcolormap')
+
+folder_name = '/path/to/data/blastocyst_growth/experiment_261_corrected';
+filename = '29072025_exp261_acute_drug_exposure_OUAB-1_150yM_E35-45__CD4_s7.ome.tif';
+experiment = 'Ouab_150μM';
+experiment_date = '2025-07-29_exp261_OUAB_150microM_s7';
+folder_analysis = '/path/to/results/blastocyst_growth/drug_lumen_growth/';
+filename_analysis = '2025-10_lumen_growth_drugs_intermediary_concentrations.mat';
+n_embryos = 2;
+ZP = 0;
+pixel_size = 0.1625;
+
+Osmolarities_str = {'257mOsm'; '295mOsm'; '345mOsm'; '445mOsm'; '234mOsm'; '169mOsm'; '123mOsm';'FGF4';'Natural stretching no ZP';'Ouabain 50μM';'Ouabain 75μM';'Control_DMSO';'AQP3-KO';'NED9-KO';'EIPA 15μM';'EIPA 7.5μM';'Ouabain 500μM';'Ouabain 150μM'};
+Conditions = {'Control'; '43.25mM'; '87.5mM'; '175mM'; '10%'; '30%'; '50%';'fgf4';'natural_stretch';'Ouab_50μM';'Ouab_75μM';'Control_DMSO';'AQP3-KO';'NED9-KO';'Eipa_15μM';'Eipa_7.5μM';'Ouab_500μM';'Ouab_150μM'};
+Legend = ismember(Conditions(:),string(experiment));
+OsmLegend = Osmolarities_str(Legend);
+
+if exist('zp_results','var') == 0
+    zp_results = struct([]);
+end
+
+EMBRYO_fullstack_BW = fullfile(folder_name,strcat("C1","-", filename));
+ZP_fullstack_BW = fullfile(folder_name,strcat("C2","-", filename));
+
+mkdir(fullfile(folder_name,strcat(filename,"_ZP_polar_transform")))
+mkdir(fullfile(folder_name,strcat(filename,"_final_masks")))
+%% ANALYSE BLASTOCYST SIZE AND ZONA PELLUCIDA THICKNESS OVERTIME from  brightfield movie
+
+info = imfinfo(EMBRYO_fullstack_BW);
+numberOftimepoints = length(info);
+embryo_centroids = [];
+clear embryo_centroid
+embryo_areas = [];
+embryo_circularities = [];
+embryo_eccentricities = [];
+embryo_majoraxis = [];
+embryo_minoraxis = [];
+
+mean_thicknesses = [];
+median_thicknesses = []; 
+image = imread(EMBRYO_fullstack_BW, 1);
+final_mask_embryo = zeros(size(image,1),size(image,2),numberOftimepoints);
+final_mask_zp = zeros(size(image,1),size(image,2),numberOftimepoints);
+
+for t = 1 : numberOftimepoints
+    t
+    % Read the t-th image in this multipage tiff file.
+    if ZP == 1
+        ZP_BW = imread(ZP_fullstack_BW, t);
+    end
+
+    EMBRYO_BW = imread(EMBRYO_fullstack_BW, t);
+    % EMBRYO : select only pixels avec value = 255 on the probability map
+    idx = find(EMBRYO_BW > 90);
+    EMBRYO_BW_150 = zeros(size(EMBRYO_BW)); EMBRYO_BW_150(idx) = 1;     %EMBRYO_BW= createMask(EMBRYO_BW);
+   
+    EMBRYO_BW = EMBRYO_BW_150;
+    EMBRYO_BW = imfill(EMBRYO_BW,'holes'); %remove holes
+   
+    EMBRYO_BW = bwareafilt(logical(EMBRYO_BW),2,'largest');
+
+    if n_embryos > 1
+        if t == 1
+            figure(6)
+            imshow(EMBRYO_BW,[])
+            disp('Please click on the embryo to analyse')
+            [x_click,y_click] = ginput(1);
+
+        [labeledEmbImage, numemb] = bwlabel(EMBRYO_BW);
+        props_emb = regionprops(labeledEmbImage, 'Centroid');
+        xy_init = vertcat(props_emb.Centroid);
+            if length(xy_init) > 0
+                emb_detected_centroid_x = xy_init(:, 1);
+                emb_detected_centroid_y = xy_init(:, 2);
+                % Compute distances from each detected embryo centroids to the clicked point.
+                distances_emb = sqrt((x_click - emb_detected_centroid_x) .^ 2 + (y_click - emb_detected_centroid_y) .^ 2);
+                % Sort distances so we know which two are closest.
+                [sortedDistances, sortOrder_emb_im1] = sort(distances_emb, 'ascend');
+                % Now we know the two closest.  Extract only those.
+                    EMBRYO_BW = ismember(labeledEmbImage, sortOrder_emb_im1(1));
+            end 
+        else
+            [labeledEmbImage, numemb] = bwlabel(EMBRYO_BW);
+            props_current_emb = regionprops(labeledEmbImage, 'Centroid');
+            xy_current_emb = vertcat(props_current_emb.Centroid);
+            
+            if length(xy_current_emb) > 0
+                current_emb_centroid_x = xy_current_emb(:, 1);
+                current_emb_centroid_y = xy_current_emb(:, 2);
+                % Compute distances from each detected embryo centroids to the clicked point.
+                distances_emb = sqrt((embryo_centroid(1) - current_emb_centroid_x) .^ 2 + (embryo_centroid(2) - current_emb_centroid_y) .^ 2);
+                % Sort distances so we know which two are closest.
+                [sortedDistances, sortOrder_current_emb] = sort(distances_emb, 'ascend');
+                % Now we know the two closest.  Extract only those.
+                    EMBRYO_BW = ismember(labeledEmbImage, sortOrder_current_emb(1));
+            end 
+
+
+    end
+
+    imshow(EMBRYO_BW,[])
+    imwrite(EMBRYO_BW, fullfile(folder_name,strcat(filename,"_final_masks"),sprintf('embryo_mask_t%d.tif', t)));
+    final_mask_embryo(:,:,t) = EMBRYO_BW;
+
+    % ZP : select only pixels avec value > 150 on the probability map
+    if ZP == 1
+        ZP_BW= uint8(255 * mat2gray(ZP_BW)); %first rescale the image between 0 and 255
+        idx = find(ZP_BW >= 40);
+        ZP_BW_200 = zeros(size(ZP_BW)); ZP_BW_200(idx) = ZP_BW(idx);
+    end
+    
+    % 1) Find the centroid of the embryo
+    stats = regionprops(EMBRYO_BW, {'Centroid','Area','Circularity','Eccentricity','MajorAxisLength','MinorAxisLength'});
+    if isempty(stats) == 0 %if the image is not empty of embryo
+        embryo_centroid = round(stats(1).Centroid);
+        embryo_area = stats(1).Area;
+        embryo_centroids = [embryo_centroids; round(stats(1).Centroid)];
+        embryo_areas = [embryo_areas;stats(1).Area];
+        embryo_circularities = [embryo_circularities ;stats.Circularity];
+        embryo_eccentricities = [embryo_eccentricities ; stats.Eccentricity];
+        embryo_majoraxis = [embryo_majoraxis ; stats.MajorAxisLength];
+        embryo_minoraxis = [embryo_minoraxis; stats.MinorAxisLength];
+
+        % 2) Converts the ZP image from cartesian coordinates to polar
+        % coordinates, from the embryo centroid
+        % a) First, select a windows of analysis, in order to exclude the zp
+        % sides touching the microfluidic chip; it will mask the undesirable
+        % parts;
+        if ZP == 1
+            if t == 1
+                figure(1)
+                imshow(ZP_BW_200, [])
+                roi = drawrectangle;
+                BW_keep = createMask(roi,ZP_BW_200);
+            end 
+
+ 
+
+            ZP_BW_150_cropped = zeros(size(ZP_BW_200));
+            ZP_BW_150_cropped(BW_keep == 1) = ZP_BW_200(BW_keep == 1);
+            ZP_BW_150_cropped = bwareaopen(ZP_BW_150_cropped, 3000);
+            [labeledZPImage, numobj] = bwlabel(ZP_BW_150_cropped);
+            props = regionprops(labeledZPImage, 'Centroid');
+            xy = vertcat(props.Centroid);
+
+            if length(xy) > 0
+                ZP_centroid_x = xy(:, 1);
+                ZP_centroid_y = xy(:, 2);
+                % Compute distances from each blob's centroid to the middle of the image.
+                distances = sqrt((embryo_centroid(1) - ZP_centroid_x) .^ 2 + (embryo_centroid(2) - ZP_centroid_y) .^ 2);
+                % Sort distances so we know which two are closest.
+                [sortedDistances, sortOrder] = sort(distances, 'ascend');
+                sortedDistances = sortedDistances(find(sortedDistances < (sortedDistances(1) * 1.15)));
+                sortOrder = sortOrder(find(sortedDistances < (sortedDistances(1) * 1.15)));
+    
+                % Now we know the two closest.  Extract only those.
+                if length(sortOrder) > 1
+                    ZP_BW_150_cropped = ismember(labeledZPImage, sortOrder(1:2));
+        
+                else
+                    ZP_BW_150_cropped= ismember(labeledZPImage, sortOrder(1));
+                end
+            end 
+
+            figure(1)
+            imshow(ZP_BW_150_cropped, [])
+            % blop
+            imwrite(ZP_BW_150_cropped, fullfile(folder_name,strcat(filename,"_final_masks"),sprintf('ZP_mask_t%d.tif', t)));
+            final_mask_zp(:,:,t) = ZP_BW_150_cropped;
+     
+            % b) Convert from polar to carthesian coordinates
+            im_pol = im_cart2pol(ZP_BW_150_cropped, [embryo_centroid(2),embryo_centroid(1)]);
+            save(fullfile(folder_name,strcat(filename,"_ZP_polar_transform"),sprintf('ZP_polar_transform_mask_t%d.mat', t)),'im_pol','-mat')
+
+
+            % 3) Compute ZP thickness
+            
+            thicknesses = [];
+            id = [];
+            for i = 1 : size(im_pol,2)
+                % find non-null values for each column
+                x_idx = find(im_pol(:,i));
+                if isempty(x_idx) == 0
+                    % find the first and the last non null values
+                    %edges = [x_idx(1), x_idx(end)];
+    
+                    % find the number of non null pixels composing the ZP ->
+                    % thickness
+                    thickness = size(x_idx,1) * pixel_size;
+                    %thickness = abs(diff(edges)) * pixel_size ;
+                    thicknesses = [thicknesses, thickness];
+                    id = [id, i];
+                end   
+            end
+            if isempty(thicknesses) == 0 %if the image is not empty
+                mean_th = mean(thicknesses);
+                median_th = median(thicknesses);
+                mean_thicknesses = [mean_thicknesses, mean_th];
+                median_thicknesses = [median_thicknesses, median_th];
+                [y, n] = min(abs(thicknesses-median_th)); %as an example column for the kymograph, choose one that it close to the median value
+        %         column_repr = thicknesses(n);%find(thicknesses == median_th);
+                col = id(n);%id(column_repr);
+                    % initiate kymograph
+                    if t == 1
+                        kymograph = zeros((col(1)+100),numberOftimepoints);
+                    end
+    
+                pixels_thick = find(im_pol(:,col(1)));
+                kymograph(1:numel(pixels_thick),t) = 1;
+                %kymograph(1:size(im_pol(:,col(1))),t) = im_pol(:,col(1));
+            else
+                mean_thicknesses = [mean_thicknesses, NaN];
+                median_thicknesses = [median_thicknesses, NaN];
+            end
+        end
+    else
+        if ZP == 1
+            mean_thicknesses = [mean_thicknesses, NaN];
+            median_thicknesses = [median_thicknesses, NaN];
+        end
+    end
+
+
+end			
+end
+
+
+%% PLOT ZP KYMOGRAPH
+h1 = figure(3)
+imshow(kymograph,[])
+ax = gca;
+ax.YDir = 'normal';
+ax.YAxis.Visible = 'off';
+ax.XAxis.Visible = 'on';
+ylim([0 50])
+% set(gcf, 'Position', get(0, 'Screensize'));
+h1.WindowState = 'maximized';
+colormap hot
+colorbar
+savefig(h1,fullfile(folder_name,strcat(filename,'_kymograph.fig')))
+
+
+%% Compute the volume
+radius_microns = sqrt(embryo_areas/pi) * pixel_size; %deduce radius from a disk area A = pi * r^2
+embryo_volumes = 4/3 * pi * (radius_microns.^3);
+%to put it in picoliters from micrometers cube
+embryo_volumes = embryo_volumes .* (10^-3);
+disp('computed')
+
+%% Compute local growth rate
+timestep = 0.167%0.33;%%0.416%0.167;%0.25;%0.33;%0.25; minutes
+
+time = linspace(0,timestep * size(embryo_volumes,1),size(embryo_volumes,1));
+
+growth_rate = zeros(1,length(embryo_volumes)) ;
+for i = 2:length(embryo_volumes)-1
+    growth_rate(i) = (embryo_volumes(i+1)-embryo_volumes(i))/(time(i+1)-time(i)) ;
+end
+growth_rate(1) = growth_rate(2);
+
+%to convert in pL/min
+growth_rate = growth_rate ./ 60;
+
+%% ZP hatching info to insert
+% TO FILL -- PUT 'NaN' for both if the embryo doesn't hatch
+hatching_start = 'NaN'
+hatching_stop = 'NaN'
+hatching = 0; %condition to be sure we are in an experiment where hatching is accomplished
+
+%% Check to consider blastocyst as a sphere in our further analysis
+figure
+plot(time,embryo_volumes,'ko-', 'DisplayName', 'Embryo volume')
+legend
+xlabel('Time (h)')
+% hold on
+% yyaxis right
+figure
+plot(time,embryo_circularities,'ro-', 'DisplayName', 'Circularities')
+legend
+ylim([0 1])
+xlabel('Time (h)')
+
+figure
+plot(time,embryo_majoraxis ./ embryo_minoraxis,'go-', 'DisplayName', 'Ratio ellipse axis')
+legend
+ylim([0 2])
+xlabel('Time (h)')
+
+figure
+plot(time,embryo_eccentricities,'bo-', 'DisplayName', 'Eccentricities')
+legend
+ylim([0 1])
+xlabel('Time (h)')
+%% PLOT ZP THICKNESS vs THE EMBRYO size AND SAVE DATA (no colorbar of growth rate)
+%Embryo volume limits
+ylim_embryo_1 = 0;
+ylim_embryo_2 = 4000; %pL
+%ZP thickness axis limits
+ylim_zp_1 = 0;
+ylim_zp_2 = 12; %microns
+
+h0 = figure(6)
+if ZP == 1
+h = plot(time,mean_thicknesses,'o-', 'DisplayName', string(OsmLegend))
+ylabel('Mean ZP thickness (µm)')
+ylim([ylim_zp_1 ylim_zp_2])
+end
+
+legend('Location','northwest')
+hold on
+yyaxis right
+%set(h, 'MarkerFaceColor', get(h,'Color'));
+h = plot(time,embryo_volumes,'ko-', 'DisplayName', 'Embryo volume')
+
+%set(h, 'MarkerFaceColor', get(h,'Color'));
+
+xlabel('time (h)')
+ylabel('Embryo volume (pL)')
+set(gca,'ycolor','k')
+legend
+fontsize(14,"points")
+ylim([ylim_embryo_1 ylim_embryo_2])
+yticks([ylim_embryo_1:500:ylim_embryo_2])
+
+
+h1 = figure(7)
+if ZP == 1
+j = plot(time,median_thicknesses,'o-','DisplayName', string(OsmLegend))
+set(j, 'MarkerFaceColor', get(j,'Color'));
+xlabel('time (h)')
+ylabel('Median ZP thickness (µm)')
+ylim([ylim_zp_1 ylim_zp_2])
+legend('Location','northwest')
+hold on
+end
+
+yyaxis right
+% plot(time,embryo_volumes,'k-')
+h = plot(time,embryo_volumes,'ko-', 'DisplayName', 'Embryo volume')
+%set(h, 'MarkerFaceColor', get(h,'Color'));
+ylim([ylim_embryo_1 ylim_embryo_2])
+yticks([ylim_embryo_1:500:ylim_embryo_2])
+ylabel('Embryo volume (pL)')
+set(gca,'ycolor','k')
+fontsize(14,"points")
+
+%% PLOT ZP THICKNESS, EMBRYO SIZE, GROWTH RATE + SAVE DATA
+%Embryo volume limits
+ylim_embryo_1 = 0;
+ylim_embryo_2 = 4000; %pL
+%ZP thickness axis limits
+ylim_zp_1 = 0;
+ylim_zp_2 = 12; %microns
+%colorbar axis limits
+cblim_1 = 0;
+cblim_2 = 10; %pL/min
+
+% MEAN ZP -----
+h2 = figure(4)
+% AxesH = axes('Ylim', [0 1e4], 'YTick', 10.^(0:4), 'NextPlot', 'add');
+plot(time,embryo_volumes,'k-')
+hold on
+emb = scatter(time,embryo_volumes,[], growth_rate, 'filled')
+ylabel('Embryo volume (pL)')
+%Remove outliers for the colorbar to better visualize the distribution of
+%growth speeds
+without_outliers = rmoutliers(growth_rate);
+% find new minimum and maximum of the distribution to rescale the colormap
+caxis([cblim_1 cblim_2]);
+map = [linspace(0, 255, 256)', linspace(0, 255, 256)', zeros(256, 1)];
+mycolormap = customcolormap([0 0.2 0.4 0.6 0.8 1],{'#F3D567', '#EE9B43', '#E74B47', '#B80422','#8C37E5','#0d0887'});
+colormap(mycolormap); %'#dc267f''#fe6100''#648fff''#ffb000''#3d68d2' %'#a820d4''#785ef0'
+cb = colorbar('location','northoutside', 'FontSize', 10);
+
+ylabel(cb, 'Intantaneous growth rate (pL/min)')
+ylim([ylim_embryo_1 ylim_embryo_2])
+yticks([ylim_embryo_1:500:ylim_embryo_2])
+
+if ZP == 1
+hold on
+yyaxis right
+if hatching == 1
+h = plot(time(1:hatching_start),mean_thicknesses(1:hatching_start),'o-', 'color', '#9ADE7B')
+xline(time(hatching_start),'--',{'Zona pellucida','hatching'},'HandleVisibility','off');
+xline(time(hatching_stop),'--','HandleVisibility','off')
+else
+h = plot(time,mean_thicknesses,'o-', 'color', '#9ADE7B', 'DisplayName', 'Zona pellucida')
+end
+
+ylabel('Mean ZP thickness (µm)')
+ylim([ylim_zp_1 ylim_zp_2])
+set(h, 'MarkerFaceColor', get(h,'Color'), 'MarkerSize', 5);
+legend([emb, h],'Embryo','Zona Pellucida','Location','northwest')
+end
+xlabel('Time (h)')
+set(gca,'ycolor','k')
+fontsize(14,"points")
+% grid on
+savefig(h2,fullfile(folder_name,strcat(filename,'_ZP_meanthickness_overtime_growthrate_colorbar.fig')))
+
+% MEDIAN ZP -----
+h3 = figure(5)
+plot(time,embryo_volumes,'k-')
+hold on
+emb = scatter(time,embryo_volumes,[], round(growth_rate), 'filled')
+ylabel('Embryo volume (pL)','FontSize',14)
+without_outliers = rmoutliers(growth_rate);
+% find new minimum and maximum of the distribution to rescale the colormap
+caxis([cblim_1 cblim_2]);
+map = [linspace(0, 255, 256)', linspace(0, 255, 256)', zeros(256, 1)];
+mycolormap = customcolormap([0 0.2 0.4 0.6 0.8 1],{'#F3D567', '#EE9B43', '#E74B47', '#B80422','#8C37E5','#0d0887'});
+
+colormap(mycolormap); %'#dc267f''#fe6100''#648fff''#ffb000''#3d68d2' %'#a820d4''#785ef0'
+cb = colorbar('location','northoutside','FontSize', 10);
+ylabel(cb, 'Intantaneous growth rate (pL/min)')
+ylim([ylim_embryo_1 ylim_embryo_2])
+yticks([ylim_embryo_1:500:ylim_embryo_2])
+
+if ZP == 1
+hold on
+yyaxis right
+if hatching == 1
+h = plot(time(1:hatching_start),median_thicknesses(1:hatching_start),'o-', 'color', '#9ADE7B')
+xline(time(hatching_start),'--',{'Zona pellucida','hatching'},'HandleVisibility','off','FontSize',14);
+%{'no Zona pellucida',''}
+xline(time(hatching_stop),'--','HandleVisibility','off')
+else
+h = plot(time,median_thicknesses,'o-', 'color', '#9ADE7B')
+end
+ylabel('Median ZP thickness (µm)')
+ylim([ylim_zp_1 ylim_zp_2])
+set(h, 'MarkerFaceColor', get(h,'Color'),'MarkerSize', 5);
+legend([emb, h],'Embryo','Zona Pellucida','Location','northwest')
+end
+xlabel('Time (h)')
+set(gca,'ycolor','k','FontSize',14)
+fontsize(14,"points")
+savefig(h3,fullfile(folder_name,strcat(filename,'_ZP_medianthickness_overtime_growthrate_colorbar.fig')))
+
+%% To split in two figures, before and after hatching
+if hatching == 1
+    % Mean ZP graph
+    h2 = figure(4)
+    %first part, before hatching
+    xlim([0 time(hatching_start)])
+    yyaxis left
+    ylim([0 (max(embryo_volumes(1:hatching_start)) + 1000)])
+    savefig(h2,fullfile(folder_name,strcat(filename,'_ZP_meanthickness_overtime_growthrate_colorbar_beforehatching.fig')))
+    
+    %second part, after hatching
+    xlim([time(hatching_start) inf])
+    yyaxis left
+    ylim([0 (max(embryo_volumes(hatching_start:end)) + 1000)])
+    savefig(h2,fullfile(folder_name,strcat(filename,'_ZP_meanthickness_overtime_growthrate_colorbar_afterhatching.fig')))
+
+    % Median ZP graph
+    h3 = figure(5)
+    xlim([0 time(hatching_start)])
+    yyaxis left
+    ylim([0 (max(embryo_volumes(1:hatching_start)) + 1000)])
+    savefig(h3,fullfile(folder_name,strcat(filename,'_ZP_medianthickness_overtime_growthrate_colorbar_beforehatching.fig')))
+
+    xlim([time(hatching_start) inf])
+    yyaxis left
+    ylim([0 (max(embryo_volumes(hatching_start:end)) + 1000)])
+    savefig(h3,fullfile(folder_name,strcat(filename,'_ZP_medianthickness_overtime_growthrate_colorbar_afterhatching.fig')))
+
+end
+disp('ok')
+%%
+zp_results(end+1).date = experiment_date;
+zp_results(end).rawlegend = experiment;
+zp_results(end).Osmlegend = OsmLegend;
+zp_results(end).time_hours = time; %h
+zp_results(end).embryo_areas = embryo_areas;
+zp_results(end).embryo_centroids = embryo_centroids;
+zp_results(end).embryo_volumes = embryo_volumes; %pL
+
+zp_results(end).embryo_circularities = embryo_circularities;
+zp_results(end).embryo_majoraxis = embryo_majoraxis;
+zp_results(end).embryo_minoraxis = embryo_minoraxis;
+zp_results(end).ellipse_ratios_axis = embryo_majoraxis ./ embryo_minoraxis;
+zp_results(end).embryo_eccentricities = embryo_eccentricities ;
+disp('ok')
+%% SAVE FINAL DATA MATRIX
+
+save(fullfile(folder_analysis,date,filename_analysis),'zp_results','-mat')
+disp('saved')
+close all

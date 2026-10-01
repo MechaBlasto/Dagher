@@ -1,0 +1,1 @@
+yapic train unet_2d "../data/yapic_training_dataset_nashishi/input/*.tif" "../data/yapic_training_dataset_nashishi/target/*.tif" -f ../data/yapic_training_dataset_nashishi/model_nashishi.h5 --csvfile ../data/yapic_training_dataset_nashishi/loss_nashishi.csv
