@@ -84,11 +84,11 @@ separately and added to the MATLAB path.
 
 If you use this code in your research, please cite the following publication:
 
-Dagher L. et al., Fluid transport properties dominate blastocyst expansion over mechanics, <todo: journal name>, 2026.
+Dagher, L. et al. (2026). Fluid transport properties dominate blastocyst expansion over mechanics. bioRxiv. https://doi.org/<to-be-assigned>
 
 @article{dagher2026,
   title     = {Fluid transport properties dominate blastocyst expansion over mechanics},
   author    = {Dagher, Louise and Bassanini, Matteo and de Plater, Ludmilla and Gropplero, Giacomo and Caporal, Clément and Maillot, Aurélien and Kastas, Ozan and Duclut, Charlie and Descroix, Stéphanie and Maître, Jean-Léon},
-  journal   = {<todo: journal name>},
+  journal   = {bioRxiv},
   year      = {2026},
 }
